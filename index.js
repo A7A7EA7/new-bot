@@ -15362,7 +15362,8 @@ var linksTable = sqliteTable("links", {
   url: text("url").notNull(),
   clicks: integer("clicks").notNull().default(0),
   abTest: text("ab_test"),
-  imageFileId: text("image_file_id")
+  imageFileId: text("image_file_id"),
+  description: text("description")
 });
 var statsTable = sqliteTable("stats", {
   id: integer("id").primaryKey().default(1),
@@ -15733,13 +15734,19 @@ async function persistLinkAbTest(position, state) {
   }
 }
 function ensureSchemaUpgrades() {
-  try {
-    sqliteConnection.exec(`ALTER TABLE links ADD COLUMN image_file_id TEXT`);
-    logger.info("Schema upgrade: added links.image_file_id column");
-  } catch (err) {
-    const msg = err?.message ?? "";
-    if (!/duplicate column name/i.test(msg)) {
-      logger.error({ err }, "Schema upgrade for links.image_file_id failed");
+  const upgrades = [
+    { sql: `ALTER TABLE links ADD COLUMN image_file_id TEXT`, label: "links.image_file_id" },
+    { sql: `ALTER TABLE links ADD COLUMN description TEXT`, label: "links.description" }
+  ];
+  for (const u of upgrades) {
+    try {
+      sqliteConnection.exec(u.sql);
+      logger.info(`Schema upgrade: added ${u.label} column`);
+    } catch (err) {
+      const msg = err?.message ?? "";
+      if (!/duplicate column name/i.test(msg)) {
+        logger.error({ err }, `Schema upgrade for ${u.label} failed`);
+      }
     }
   }
 }
@@ -15765,7 +15772,8 @@ async function loadStateFromDb() {
           url: row.url,
           clicks: row.clicks,
           abTest: parseAbTest(row.abTest),
-          imageFileId: row.imageFileId ?? null
+          imageFileId: row.imageFileId ?? null,
+          description: row.description ?? null
         });
       }
     }
@@ -15880,7 +15888,8 @@ async function rewriteAllLinks() {
             url: l.url,
             clicks: l.clicks ?? 0,
             abTest: serializeAbTest(l.abTest ?? null),
-            imageFileId: l.imageFileId ?? null
+            imageFileId: l.imageFileId ?? null,
+            description: l.description ?? null
           }))
         );
       }
@@ -15933,6 +15942,14 @@ async function getTargetUser(ctx) {
     name: target.first_name + (target.last_name ? ` ${target.last_name}` : "")
   };
 }
+function buildLinkDescriptionsList() {
+  const lines = [];
+  for (let i = 0; i < linkList.length; i++) {
+    const desc2 = linkList[i].description?.trim();
+    if (desc2) lines.push(`${i + 1}. *${linkList[i].title}* \u2014 ${desc2}`);
+  }
+  return lines.join("\n");
+}
 async function sendStartScreen(ctx) {
   const keyboard = buildStartKeyboard();
   let caption = settings.welcomeCaption;
@@ -15940,6 +15957,18 @@ async function sendStartScreen(ctx) {
     caption = `${caption}
 
 ${getLiveCounterLine()}`;
+  }
+  const descList = buildLinkDescriptionsList();
+  let extraMessage = null;
+  if (descList) {
+    const combined = `${caption}
+
+${descList}`;
+    if (combined.length <= 1024) {
+      caption = combined;
+    } else {
+      extraMessage = descList;
+    }
   }
   const photo = settings.preStartImageFileId ? settings.preStartImageFileId : import_telegraf.Input.fromLocalFile(getWelcomeImagePath());
   try {
@@ -15960,6 +15989,13 @@ ${getLiveCounterLine()}`;
       });
     } else {
       throw err;
+    }
+  }
+  if (extraMessage) {
+    try {
+      await ctx.reply(extraMessage, { parse_mode: "Markdown", disable_web_page_preview: true });
+    } catch (err) {
+      logger.warn({ err }, "Failed to send link descriptions follow-up message");
     }
   }
 }
@@ -16916,14 +16952,15 @@ async function showLinksMenu(ctx) {
   const links = listLinks();
   const list = links.length ? links.map((l) => {
     const pic = linkList[l.index]?.imageFileId ? " \u{1F5BC}" : "";
-    return `${l.index + 1}. *${l.title}*${pic} \u2014 ${l.clicks} \u043A\u043B\u0438\u043A\u043E\u0432`;
+    const desc2 = l.description ? " \u{1F4DD}" : "";
+    return `${l.index + 1}. *${l.title}*${pic}${desc2} \u2014 ${l.clicks} \u043A\u043B\u0438\u043A\u043E\u0432`;
   }).join("\n") : "_\u0421\u043F\u0438\u0441\u043E\u043A \u043F\u0443\u0441\u0442_";
   const text2 = `\u{1F517} *\u0423\u043F\u0440\u0430\u0432\u043B\u0435\u043D\u0438\u0435 \u0441\u0441\u044B\u043B\u043A\u0430\u043C\u0438*
 \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501
 
 ${list}
 
-_\u{1F5BC} = \u0443 \u0441\u0441\u044B\u043B\u043A\u0438 \u0435\u0441\u0442\u044C \u043A\u0430\u0440\u0442\u0438\u043D\u043A\u0430._
+_\u{1F5BC} = \u0443 \u0441\u0441\u044B\u043B\u043A\u0438 \u0435\u0441\u0442\u044C \u043A\u0430\u0440\u0442\u0438\u043D\u043A\u0430. \u{1F4DD} = \u0435\u0441\u0442\u044C \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435._
 
 \u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435:`;
   const buttons = [
@@ -16937,7 +16974,10 @@ _\u{1F5BC} = \u0443 \u0441\u0441\u044B\u043B\u043A\u0438 \u0435\u0441\u0442\u044
       import_telegraf.Markup.button.callback("\u{1F310} \u0418\u0437\u043C\u0435\u043D\u0438\u0442\u044C URL", "admin:links:edit_url")
     ],
     [
-      import_telegraf.Markup.button.callback("\u{1F5BC} \u041A\u0430\u0440\u0442\u0438\u043D\u043A\u0438 \u0441\u0441\u044B\u043B\u043E\u043A", "admin:links:image"),
+      import_telegraf.Markup.button.callback("\u{1F4DD} \u041E\u043F\u0438\u0441\u0430\u043D\u0438\u044F", "admin:links:description"),
+      import_telegraf.Markup.button.callback("\u{1F5BC} \u041A\u0430\u0440\u0442\u0438\u043D\u043A\u0438 \u0441\u0441\u044B\u043B\u043E\u043A", "admin:links:image")
+    ],
+    [
       import_telegraf.Markup.button.callback("\u{1F504} \u0421\u0431\u0440\u043E\u0441\u0438\u0442\u044C \u043A\u043B\u0438\u043A\u0438", "admin:links:reset")
     ],
     [import_telegraf.Markup.button.callback("\u{1F519} \u041D\u0430\u0437\u0430\u0434", "admin:main")]
@@ -17142,6 +17182,66 @@ bot.action(/^admin:links:edit_url:(\d+)$/, async (ctx) => {
     {
       parse_mode: "Markdown",
       ...import_telegraf.Markup.inlineKeyboard([[import_telegraf.Markup.button.callback("\u274C \u041E\u0442\u043C\u0435\u043D\u0430", "admin:links")]])
+    }
+  );
+});
+bot.action("admin:links:description", async (ctx) => {
+  if (!await ownerGate(ctx)) return;
+  try {
+    await ctx.answerCbQuery();
+  } catch {
+  }
+  const links = listLinks();
+  if (links.length === 0) {
+    await ctx.editMessageText("\u{1F4ED} \u041D\u0435\u0442 \u0441\u0441\u044B\u043B\u043E\u043A \u0434\u043B\u044F \u0440\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u043D\u0438\u044F.", {
+      ...import_telegraf.Markup.inlineKeyboard([[import_telegraf.Markup.button.callback("\u{1F519} \u041D\u0430\u0437\u0430\u0434", "admin:links")]])
+    });
+    return;
+  }
+  const buttons = links.map((l) => [
+    import_telegraf.Markup.button.callback(
+      `${l.description ? "\u{1F4DD}" : "\u2795"} ${l.index + 1}. ${l.title}`,
+      `admin:links:description:${l.index}`
+    )
+  ]);
+  buttons.push([import_telegraf.Markup.button.callback("\u{1F519} \u041D\u0430\u0437\u0430\u0434", "admin:links")]);
+  await ctx.editMessageText(
+    "\u{1F4DD} *\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u044F \u0441\u0441\u044B\u043B\u043E\u043A*\n\n\u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0441\u0441\u044B\u043B\u043A\u0443, \u0447\u0442\u043E\u0431\u044B \u0434\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u0438\u043B\u0438 \u0438\u0437\u043C\u0435\u043D\u0438\u0442\u044C \u0435\u0451 \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435.\n\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u043F\u043E\u044F\u0432\u0438\u0442\u0441\u044F \u0443 \u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u0435\u0439 \u043F\u043E\u0434 \u043F\u0440\u0438\u0432\u0435\u0442\u0441\u0442\u0432\u0435\u043D\u043D\u043E\u0439 \u043A\u0430\u0440\u0442\u0438\u043D\u043A\u043E\u0439 \u0440\u044F\u0434\u043E\u043C \u0441 \u043D\u0430\u0437\u0432\u0430\u043D\u0438\u0435\u043C \u0441\u0441\u044B\u043B\u043A\u0438.",
+    {
+      parse_mode: "Markdown",
+      ...import_telegraf.Markup.inlineKeyboard(buttons)
+    }
+  );
+});
+bot.action(/^admin:links:description:(\d+)$/, async (ctx) => {
+  if (!await ownerGate(ctx)) return;
+  const m = ctx.match;
+  const index = parseInt(m[1], 10);
+  try {
+    await ctx.answerCbQuery();
+  } catch {
+  }
+  const link = listLinks()[index];
+  if (!link) {
+    await ctx.editMessageText("\u274C \u0421\u0441\u044B\u043B\u043A\u0430 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u0430.", {
+      ...import_telegraf.Markup.inlineKeyboard([[import_telegraf.Markup.button.callback("\u{1F519} \u041D\u0430\u0437\u0430\u0434", "admin:links:description")]])
+    });
+    return;
+  }
+  setOwnerMode(ctx.from.id, { mode: "edit_link_description", index });
+  const current = link.description ? `
+
+\u0422\u0435\u043A\u0443\u0449\u0435\u0435 \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435:
+_${link.description}_` : "\n\n_\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u044F \u043F\u043E\u043A\u0430 \u043D\u0435\u0442._";
+  await ctx.editMessageText(
+    `\u{1F4DD} *\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u0441\u0441\u044B\u043B\u043A\u0438 #${index + 1}*
+
+\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435: *${link.title}*${current}
+
+\u041E\u0442\u043F\u0440\u0430\u0432\u044C\u0442\u0435 \u043D\u043E\u0432\u043E\u0435 \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 (\u0434\u043E 160 \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432), \`-\` \u0447\u0442\u043E\u0431\u044B \u0443\u0434\u0430\u043B\u0438\u0442\u044C, \u0438\u043B\u0438 /cancel.`,
+    {
+      parse_mode: "Markdown",
+      ...import_telegraf.Markup.inlineKeyboard([[import_telegraf.Markup.button.callback("\u274C \u041E\u0442\u043C\u0435\u043D\u0430", "admin:links:description")]])
     }
   );
 });
@@ -18785,6 +18885,34 @@ ${updated.url}`,
     );
     return;
   }
+  if (state.mode === "edit_link_description") {
+    const idx = state.index;
+    setOwnerMode(ctx.from.id, { mode: "idle" });
+    const raw = text2.trim();
+    let newDescription;
+    if (raw === "-" || raw === "" || raw.toLowerCase() === "\u0443\u0434\u0430\u043B\u0438\u0442\u044C") {
+      newDescription = null;
+    } else if (raw.length > 160) {
+      await ctx.reply("\u26A0\uFE0F \u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u0434\u043E\u043B\u0436\u043D\u043E \u0431\u044B\u0442\u044C \u043D\u0435 \u0434\u043B\u0438\u043D\u043D\u0435\u0435 160 \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432.", {
+        ...import_telegraf.Markup.inlineKeyboard([[import_telegraf.Markup.button.callback("\u{1F519} \u041A \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u044F\u043C", "admin:links:description")]])
+      });
+      return;
+    } else {
+      newDescription = raw;
+    }
+    const updated = await adminUpdateLink(idx, { description: newDescription });
+    if (!updated) {
+      await ctx.reply("\u274C \u0421\u0441\u044B\u043B\u043A\u0430 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u0430.");
+      return;
+    }
+    const reply = newDescription ? `\u2705 \u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u0441\u0441\u044B\u043B\u043A\u0438 #${idx + 1} (*${updated.title}*) \u043E\u0431\u043D\u043E\u0432\u043B\u0435\u043D\u043E:
+_${newDescription}_` : `\u2705 \u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u0441\u0441\u044B\u043B\u043A\u0438 #${idx + 1} (*${updated.title}*) \u0443\u0434\u0430\u043B\u0435\u043D\u043E.`;
+    await ctx.reply(reply, {
+      parse_mode: "Markdown",
+      ...import_telegraf.Markup.inlineKeyboard([[import_telegraf.Markup.button.callback("\u{1F519} \u041A \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u044F\u043C", "admin:links:description")]])
+    });
+    return;
+  }
   if (state.mode === "edit_welcome") {
     setOwnerMode(ctx.from.id, { mode: "idle" });
     const newText = text2.trim();
@@ -19394,7 +19522,8 @@ function listLinks() {
     title: e.title,
     url: e.url,
     clicks: e.clicks ?? 0,
-    variantCount: e.abTest?.variants.length ?? 0
+    variantCount: e.abTest?.variants.length ?? 0,
+    description: e.description ?? null
   }));
 }
 async function adminAddLink(title, url) {
@@ -19406,7 +19535,8 @@ async function adminAddLink(title, url) {
     title: entry.title,
     url: entry.url,
     clicks: 0,
-    variantCount: 0
+    variantCount: 0,
+    description: null
   };
 }
 async function adminUpdateLink(index, patch) {
@@ -19414,13 +19544,15 @@ async function adminUpdateLink(index, patch) {
   if (!entry) return null;
   if (patch.title !== void 0) entry.title = patch.title;
   if (patch.url !== void 0) entry.url = patch.url;
+  if (patch.description !== void 0) entry.description = patch.description;
   await rewriteAllLinks();
   return {
     index,
     title: entry.title,
     url: entry.url,
     clicks: entry.clicks ?? 0,
-    variantCount: entry.abTest?.variants.length ?? 0
+    variantCount: entry.abTest?.variants.length ?? 0,
+    description: entry.description ?? null
   };
 }
 async function adminRemoveLink(index) {
@@ -19433,7 +19565,8 @@ async function adminRemoveLink(index) {
     title: entry.title,
     url: entry.url,
     clicks: entry.clicks ?? 0,
-    variantCount: entry.abTest?.variants.length ?? 0
+    variantCount: entry.abTest?.variants.length ?? 0,
+    description: entry.description ?? null
   };
 }
 async function adminResetClicks(index) {

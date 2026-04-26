@@ -13,6 +13,7 @@ export const linksTable = sqliteTable("links", {
   clicks: integer("clicks").notNull().default(0),
   abTest: text("ab_test"),
   imageFileId: text("image_file_id"),
+  description: text("description"),
 });
 
 export const statsTable = sqliteTable("stats", {

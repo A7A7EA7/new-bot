@@ -83,6 +83,7 @@ interface LinkEntry {
   clicks?: number;
   abTest?: AbTestState | null;
   imageFileId?: string | null;
+  description?: string | null;
 }
 
 function parseAbTest(raw: string | null | undefined): AbTestState | null {
@@ -392,13 +393,19 @@ async function persistLinkAbTest(position: number, state: AbTestState | null): P
 
 function ensureSchemaUpgrades(): void {
   // Idempotent runtime migrations for SQLite — safe to call on every startup.
-  try {
-    sqliteConnection.exec(`ALTER TABLE links ADD COLUMN image_file_id TEXT`);
-    logger.info("Schema upgrade: added links.image_file_id column");
-  } catch (err) {
-    const msg = (err as Error)?.message ?? "";
-    if (!/duplicate column name/i.test(msg)) {
-      logger.error({ err }, "Schema upgrade for links.image_file_id failed");
+  const upgrades: { sql: string; label: string }[] = [
+    { sql: `ALTER TABLE links ADD COLUMN image_file_id TEXT`, label: "links.image_file_id" },
+    { sql: `ALTER TABLE links ADD COLUMN description TEXT`, label: "links.description" },
+  ];
+  for (const u of upgrades) {
+    try {
+      sqliteConnection.exec(u.sql);
+      logger.info(`Schema upgrade: added ${u.label} column`);
+    } catch (err) {
+      const msg = (err as Error)?.message ?? "";
+      if (!/duplicate column name/i.test(msg)) {
+        logger.error({ err }, `Schema upgrade for ${u.label} failed`);
+      }
     }
   }
 }
@@ -427,6 +434,7 @@ async function loadStateFromDb(): Promise<void> {
           clicks: row.clicks,
           abTest: parseAbTest(row.abTest),
           imageFileId: row.imageFileId ?? null,
+          description: row.description ?? null,
         });
       }
     }
@@ -564,6 +572,7 @@ async function rewriteAllLinks(): Promise<void> {
             clicks: l.clicks ?? 0,
             abTest: serializeAbTest(l.abTest ?? null),
             imageFileId: l.imageFileId ?? null,
+            description: l.description ?? null,
           })),
         );
       }
@@ -631,11 +640,31 @@ async function getTargetUser(ctx: Context): Promise<{ id: number; name: string }
   };
 }
 
+function buildLinkDescriptionsList(): string {
+  const lines: string[] = [];
+  for (let i = 0; i < linkList.length; i++) {
+    const desc = linkList[i].description?.trim();
+    if (desc) lines.push(`${i + 1}. *${linkList[i].title}* — ${desc}`);
+  }
+  return lines.join("\n");
+}
+
 async function sendStartScreen(ctx: Context): Promise<void> {
   const keyboard = buildStartKeyboard();
   let caption = settings.welcomeCaption;
   if (settings.liveCounterEnabled) {
     caption = `${caption}\n\n${getLiveCounterLine()}`;
+  }
+  const descList = buildLinkDescriptionsList();
+  let extraMessage: string | null = null;
+  if (descList) {
+    const combined = `${caption}\n\n${descList}`;
+    // Telegram caption limit is 1024 characters. If combined fits, inline it; otherwise send separately.
+    if (combined.length <= 1024) {
+      caption = combined;
+    } else {
+      extraMessage = descList;
+    }
   }
   const photo = settings.preStartImageFileId
     ? settings.preStartImageFileId
@@ -658,6 +687,13 @@ async function sendStartScreen(ctx: Context): Promise<void> {
       });
     } else {
       throw err;
+    }
+  }
+  if (extraMessage) {
+    try {
+      await ctx.reply(extraMessage, { parse_mode: "Markdown", disable_web_page_preview: true });
+    } catch (err) {
+      logger.warn({ err }, "Failed to send link descriptions follow-up message");
     }
   }
 }
@@ -1308,6 +1344,7 @@ type OwnerInteraction =
     }
   | { mode: "rename_link"; index: number }
   | { mode: "edit_link_url"; index: number }
+  | { mode: "edit_link_description"; index: number }
   | { mode: "edit_welcome" }
   | { mode: "edit_description" }
   | { mode: "edit_faq" }
@@ -1730,7 +1767,8 @@ async function showLinksMenu(ctx: Context): Promise<void> {
     ? links
         .map((l) => {
           const pic = linkList[l.index]?.imageFileId ? " 🖼" : "";
-          return `${l.index + 1}. *${l.title}*${pic} — ${l.clicks} кликов`;
+          const desc = l.description ? " 📝" : "";
+          return `${l.index + 1}. *${l.title}*${pic}${desc} — ${l.clicks} кликов`;
         })
         .join("\n")
     : "_Список пуст_";
@@ -1738,7 +1776,7 @@ async function showLinksMenu(ctx: Context): Promise<void> {
     "🔗 *Управление ссылками*\n" +
     "━━━━━━━━━━━━━━━━━━\n\n" +
     `${list}\n\n` +
-    "_🖼 = у ссылки есть картинка._\n\n" +
+    "_🖼 = у ссылки есть картинка. 📝 = есть описание._\n\n" +
     "Выберите действие:";
   const buttons = [
     [Markup.button.callback("📈 Топ кликов", "admin:links:top")],
@@ -1751,7 +1789,10 @@ async function showLinksMenu(ctx: Context): Promise<void> {
       Markup.button.callback("🌐 Изменить URL", "admin:links:edit_url"),
     ],
     [
+      Markup.button.callback("📝 Описания", "admin:links:description"),
       Markup.button.callback("🖼 Картинки ссылок", "admin:links:image"),
+    ],
+    [
       Markup.button.callback("🔄 Сбросить клики", "admin:links:reset"),
     ],
     [Markup.button.callback("🔙 Назад", "admin:main")],
@@ -1927,6 +1968,55 @@ bot.action(/^admin:links:edit_url:(\d+)$/, async (ctx) => {
     {
       parse_mode: "Markdown",
       ...Markup.inlineKeyboard([[Markup.button.callback("❌ Отмена", "admin:links")]]),
+    },
+  );
+});
+
+bot.action("admin:links:description", async (ctx) => {
+  if (!(await ownerGate(ctx))) return;
+  try { await ctx.answerCbQuery(); } catch { /* ignore */ }
+  const links = listLinks();
+  if (links.length === 0) {
+    await ctx.editMessageText("📭 Нет ссылок для редактирования.", {
+      ...Markup.inlineKeyboard([[Markup.button.callback("🔙 Назад", "admin:links")]]),
+    });
+    return;
+  }
+  const buttons = links.map((l) => [
+    Markup.button.callback(
+      `${l.description ? "📝" : "➕"} ${l.index + 1}. ${l.title}`,
+      `admin:links:description:${l.index}`,
+    ),
+  ]);
+  buttons.push([Markup.button.callback("🔙 Назад", "admin:links")]);
+  await ctx.editMessageText(
+    "📝 *Описания ссылок*\n\nВыберите ссылку, чтобы добавить или изменить её описание.\nОписание появится у пользователей под приветственной картинкой рядом с названием ссылки.",
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard(buttons),
+    },
+  );
+});
+
+bot.action(/^admin:links:description:(\d+)$/, async (ctx) => {
+  if (!(await ownerGate(ctx))) return;
+  const m = (ctx as Context & { match: RegExpExecArray }).match;
+  const index = parseInt(m[1], 10);
+  try { await ctx.answerCbQuery(); } catch { /* ignore */ }
+  const link = listLinks()[index];
+  if (!link) {
+    await ctx.editMessageText("❌ Ссылка не найдена.", {
+      ...Markup.inlineKeyboard([[Markup.button.callback("🔙 Назад", "admin:links:description")]]),
+    });
+    return;
+  }
+  setOwnerMode(ctx.from!.id, { mode: "edit_link_description", index });
+  const current = link.description ? `\n\nТекущее описание:\n_${link.description}_` : "\n\n_Описания пока нет._";
+  await ctx.editMessageText(
+    `📝 *Описание ссылки #${index + 1}*\n\nНазвание: *${link.title}*${current}\n\nОтправьте новое описание (до 160 символов), \`-\` чтобы удалить, или /cancel.`,
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([[Markup.button.callback("❌ Отмена", "admin:links:description")]]),
     },
   );
 });
@@ -3543,6 +3633,36 @@ bot.on(message("text"), async (ctx, next) => {
     return;
   }
 
+  if (state.mode === "edit_link_description") {
+    const idx = state.index;
+    setOwnerMode(ctx.from!.id, { mode: "idle" });
+    const raw = text.trim();
+    let newDescription: string | null;
+    if (raw === "-" || raw === "" || raw.toLowerCase() === "удалить") {
+      newDescription = null;
+    } else if (raw.length > 160) {
+      await ctx.reply("⚠️ Описание должно быть не длиннее 160 символов.", {
+        ...Markup.inlineKeyboard([[Markup.button.callback("🔙 К описаниям", "admin:links:description")]]),
+      });
+      return;
+    } else {
+      newDescription = raw;
+    }
+    const updated = await adminUpdateLink(idx, { description: newDescription });
+    if (!updated) {
+      await ctx.reply("❌ Ссылка не найдена.");
+      return;
+    }
+    const reply = newDescription
+      ? `✅ Описание ссылки #${idx + 1} (*${updated.title}*) обновлено:\n_${newDescription}_`
+      : `✅ Описание ссылки #${idx + 1} (*${updated.title}*) удалено.`;
+    await ctx.reply(reply, {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([[Markup.button.callback("🔙 К описаниям", "admin:links:description")]]),
+    });
+    return;
+  }
+
   if (state.mode === "edit_welcome") {
     setOwnerMode(ctx.from!.id, { mode: "idle" });
     const newText = text.trim();
@@ -4294,6 +4414,7 @@ export interface AdminLink {
   url: string;
   clicks: number;
   variantCount: number;
+  description: string | null;
 }
 
 export function listLinks(): AdminLink[] {
@@ -4303,6 +4424,7 @@ export function listLinks(): AdminLink[] {
     url: e.url,
     clicks: e.clicks ?? 0,
     variantCount: e.abTest?.variants.length ?? 0,
+    description: e.description ?? null,
   }));
 }
 
@@ -4316,17 +4438,19 @@ export async function adminAddLink(title: string, url: string): Promise<AdminLin
     url: entry.url,
     clicks: 0,
     variantCount: 0,
+    description: null,
   };
 }
 
 export async function adminUpdateLink(
   index: number,
-  patch: { title?: string; url?: string },
+  patch: { title?: string; url?: string; description?: string | null },
 ): Promise<AdminLink | null> {
   const entry = linkList[index];
   if (!entry) return null;
   if (patch.title !== undefined) entry.title = patch.title;
   if (patch.url !== undefined) entry.url = patch.url;
+  if (patch.description !== undefined) entry.description = patch.description;
   await rewriteAllLinks();
   return {
     index,
@@ -4334,6 +4458,7 @@ export async function adminUpdateLink(
     url: entry.url,
     clicks: entry.clicks ?? 0,
     variantCount: entry.abTest?.variants.length ?? 0,
+    description: entry.description ?? null,
   };
 }
 
@@ -4348,6 +4473,7 @@ export async function adminRemoveLink(index: number): Promise<AdminLink | null> 
     url: entry.url,
     clicks: entry.clicks ?? 0,
     variantCount: entry.abTest?.variants.length ?? 0,
+    description: entry.description ?? null,
   };
 }
 
