@@ -1322,6 +1322,7 @@ type OwnerInteraction =
   | { mode: "rename_link"; index: number }
   | { mode: "edit_link_url"; index: number }
   | { mode: "edit_link_description"; index: number }
+  | { mode: "awaiting_restore_file" }
   | { mode: "edit_welcome" }
   | { mode: "edit_description" }
   | { mode: "edit_faq" }
@@ -1372,7 +1373,7 @@ function buildAdminMainMenu() {
     ],
     [
       Markup.button.callback("🔌 Транспорт", "admin:transport"),
-      Markup.button.callback("💾 Бэкап БД", "admin:backup"),
+      Markup.button.callback("💾 Резервная копия", "admin:backup"),
     ],
     [Markup.button.callback("❌ Закрыть", "admin:close")],
   ]);
@@ -1531,18 +1532,16 @@ function clearInMemoryState(): void {
   settings.lastAutoBackupDate = null;
 }
 
-bot.command("restore", async (ctx) => {
-  if (!isOwner(ctx)) return;
+interface RestoreDocLike {
+  file_id: string;
+  file_name?: string;
+  file_size?: number;
+}
 
-  const replied = ctx.message?.reply_to_message;
-  const doc =
-    replied && "document" in replied ? replied.document : undefined;
-  if (!doc) {
-    await ctx.reply(
-      "⚠️ Чтобы восстановить базу, ответьте командой /restore на сообщение с файлом резервной копии (.db).",
-    );
-    return;
-  }
+async function restoreDatabaseFromDoc(
+  ctx: Context,
+  doc: RestoreDocLike,
+): Promise<void> {
   if (!doc.file_name?.toLowerCase().endsWith(".db")) {
     await ctx.reply("⚠️ Файл должен иметь расширение .db");
     return;
@@ -1609,6 +1608,9 @@ bot.command("restore", async (ctx) => {
         `🔗 Ссылок: ${linkList.length}\n` +
         `👥 Известных пользователей: ${knownUsers.size}\n` +
         `📊 Запусков: ${stats.totalStarts}`,
+      {
+        ...Markup.inlineKeyboard([[Markup.button.callback("🔙 В меню", "admin:main")]]),
+      },
     );
     logger.info(
       {
@@ -1630,6 +1632,21 @@ bot.command("restore", async (ctx) => {
       // ignore cleanup errors
     }
   }
+}
+
+bot.command("restore", async (ctx) => {
+  if (!isOwner(ctx)) return;
+
+  const replied = ctx.message?.reply_to_message;
+  const doc =
+    replied && "document" in replied ? replied.document : undefined;
+  if (!doc) {
+    await ctx.reply(
+      "⚠️ Чтобы восстановить базу, ответьте командой /restore на сообщение с файлом резервной копии (.db), либо нажмите «📥 Импорт» в меню «💾 Резервная копия».",
+    );
+    return;
+  }
+  await restoreDatabaseFromDoc(ctx, doc);
 });
 
 async function ownerGate(ctx: Context): Promise<boolean> {
@@ -3202,39 +3219,72 @@ bot.command("transport", async (ctx) => {
   await ctx.reply(text, { parse_mode: "Markdown" });
 });
 
+function buildBackupMenuKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback("📤 Экспорт (скачать)", "admin:backup:export")],
+    [Markup.button.callback("📥 Импорт (восстановить)", "admin:backup:import")],
+    [Markup.button.callback("🔙 Назад", "admin:main")],
+  ]);
+}
+
+const BACKUP_MENU_TEXT =
+  "💾 *Резервная копия*\n" +
+  "━━━━━━━━━━━━━━━━━━\n\n" +
+  "📤 *Экспорт* — пришлю файл `.db` со всеми настройками, ссылками, " +
+  "пользователями и статистикой. Сохраните его в надёжное место.\n\n" +
+  "📥 *Импорт* — пришлите ранее сохранённый `.db` файл, и я " +
+  "восстановлю состояние бота из него.\n\n" +
+  "_Текущие данные при импорте будут перезаписаны._";
+
 bot.action("admin:backup", async (ctx) => {
   if (!(await ownerGate(ctx))) return;
-  try { await ctx.answerCbQuery("Готовлю бэкап…"); } catch { /* ignore */ }
+  try { await ctx.answerCbQuery(); } catch { /* ignore */ }
+  setOwnerMode(ctx.from!.id, { mode: "idle" });
+  try {
+    await ctx.editMessageText(BACKUP_MENU_TEXT, {
+      parse_mode: "Markdown",
+      ...buildBackupMenuKeyboard(),
+    });
+  } catch {
+    await ctx.reply(BACKUP_MENU_TEXT, {
+      parse_mode: "Markdown",
+      ...buildBackupMenuKeyboard(),
+    });
+  }
+});
+
+bot.action("admin:backup:export", async (ctx) => {
+  if (!(await ownerGate(ctx))) return;
+  try { await ctx.answerCbQuery("Готовлю файл…"); } catch { /* ignore */ }
   try {
     await sendBackupToOwner("💾 Резервная копия базы данных");
     try {
       await ctx.editMessageText(
-        "✅ *Бэкап отправлен*\n\n" +
+        "✅ *Файл отправлен*\n\n" +
           "Файл `bot-backup-*.db` пришёл вам в личные сообщения.\n" +
-          "Сохраните его перед переездом между хостами — потом восстановите " +
-          "командой /restore (ответом на это же сообщение).",
+          "Сохраните его — потом сможете восстановить через «📥 Импорт».",
         {
           parse_mode: "Markdown",
           ...Markup.inlineKeyboard([
-            [Markup.button.callback("💾 Ещё раз", "admin:backup")],
-            [Markup.button.callback("🔙 Назад", "admin:main")],
+            [Markup.button.callback("📤 Ещё раз", "admin:backup:export")],
+            [Markup.button.callback("🔙 Назад", "admin:backup")],
           ]),
         },
       );
     } catch {
-      /* ignore — main message already edited or replaced */
+      /* ignore */
     }
   } catch (err) {
     logger.error({ err }, "Failed to send backup from admin menu");
     const msg = String((err as Error)?.message ?? err);
     try {
       await ctx.editMessageText(
-        "❌ *Не удалось создать бэкап.*\n`" + escapeMd(msg) + "`",
+        "❌ *Не удалось создать файл.*\n`" + escapeMd(msg) + "`",
         {
           parse_mode: "Markdown",
           ...Markup.inlineKeyboard([
-            [Markup.button.callback("🔁 Повторить", "admin:backup")],
-            [Markup.button.callback("🔙 Назад", "admin:main")],
+            [Markup.button.callback("🔁 Повторить", "admin:backup:export")],
+            [Markup.button.callback("🔙 Назад", "admin:backup")],
           ]),
         },
       );
@@ -3242,6 +3292,36 @@ bot.action("admin:backup", async (ctx) => {
       /* ignore */
     }
   }
+});
+
+bot.action("admin:backup:import", async (ctx) => {
+  if (!(await ownerGate(ctx))) return;
+  try { await ctx.answerCbQuery(); } catch { /* ignore */ }
+  setOwnerMode(ctx.from!.id, { mode: "awaiting_restore_file" });
+  await ctx.editMessageText(
+    "📥 *Импорт резервной копии*\n\n" +
+      "Пришлите файл `.db`, который вы получали через «📤 Экспорт».\n\n" +
+      "⚠️ Все текущие настройки, ссылки, статистика будут заменены данными из файла.\n\n" +
+      "Чтобы отменить — нажмите «❌ Отмена» или /cancel.",
+    {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([[Markup.button.callback("❌ Отмена", "admin:backup")]]),
+    },
+  );
+});
+
+bot.on(message("document"), async (ctx, next) => {
+  if (!isOwner(ctx)) {
+    if (next) await next();
+    return;
+  }
+  const state = getOwnerMode(ctx.from!.id);
+  if (state.mode !== "awaiting_restore_file") {
+    if (next) await next();
+    return;
+  }
+  setOwnerMode(ctx.from!.id, { mode: "idle" });
+  await restoreDatabaseFromDoc(ctx, ctx.message.document);
 });
 
 function buildTransportKeyboard() {
