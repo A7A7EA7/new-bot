@@ -11,7 +11,8 @@ bothost-bot/
 ├── index.js          ← собранный бандл (его запускает bothost)
 ├── package.json      ← runtime-зависимости + npm start
 ├── assets/
-│   └── welcome.png   ← приветственная картинка
+│   ├── welcome.png            ← картинка, которую бот шлёт после /start
+│   └── description-picture.png ← 640×360, для @BotFather → Bot Settings → Description Picture
 ├── src/              ← исходники TypeScript (для редактирования)
 │   ├── index.ts
 │   ├── bot.ts
