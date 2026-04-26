@@ -597,9 +597,13 @@ async function isAdmin(ctx: Context, userId: number): Promise<boolean> {
 type AnyButton = ReturnType<typeof Markup.button.url> | ReturnType<typeof Markup.button.callback>;
 
 function buildLinkButtons(): AnyButton[][] {
-  return linkList.map((entry, i) => [
-    Markup.button.url(`${i + 1}. ${entry.title}`, entry.url),
-  ]);
+  return linkList.map((entry, i) => {
+    const desc = entry.description?.trim();
+    const label = desc
+      ? `${i + 1}. ${entry.title} — ${desc}`
+      : `${i + 1}. ${entry.title}`;
+    return [Markup.button.url(label, entry.url)];
+  });
 }
 
 let botUsername = "";
@@ -640,31 +644,11 @@ async function getTargetUser(ctx: Context): Promise<{ id: number; name: string }
   };
 }
 
-function buildLinkDescriptionsList(): string {
-  const lines: string[] = [];
-  for (let i = 0; i < linkList.length; i++) {
-    const desc = linkList[i].description?.trim();
-    if (desc) lines.push(`${i + 1}. *${linkList[i].title}* — ${desc}`);
-  }
-  return lines.join("\n");
-}
-
 async function sendStartScreen(ctx: Context): Promise<void> {
   const keyboard = buildStartKeyboard();
   let caption = settings.welcomeCaption;
   if (settings.liveCounterEnabled) {
     caption = `${caption}\n\n${getLiveCounterLine()}`;
-  }
-  const descList = buildLinkDescriptionsList();
-  let extraMessage: string | null = null;
-  if (descList) {
-    const combined = `${caption}\n\n${descList}`;
-    // Telegram caption limit is 1024 characters. If combined fits, inline it; otherwise send separately.
-    if (combined.length <= 1024) {
-      caption = combined;
-    } else {
-      extraMessage = descList;
-    }
   }
   const photo = settings.preStartImageFileId
     ? settings.preStartImageFileId
@@ -687,13 +671,6 @@ async function sendStartScreen(ctx: Context): Promise<void> {
       });
     } else {
       throw err;
-    }
-  }
-  if (extraMessage) {
-    try {
-      await ctx.reply(extraMessage, { parse_mode: "Markdown", disable_web_page_preview: true });
-    } catch (err) {
-      logger.warn({ err }, "Failed to send link descriptions follow-up message");
     }
   }
 }
@@ -1990,7 +1967,7 @@ bot.action("admin:links:description", async (ctx) => {
   ]);
   buttons.push([Markup.button.callback("🔙 Назад", "admin:links")]);
   await ctx.editMessageText(
-    "📝 *Описания ссылок*\n\nВыберите ссылку, чтобы добавить или изменить её описание.\nОписание появится у пользователей под приветственной картинкой рядом с названием ссылки.",
+    "📝 *Описания ссылок*\n\nВыберите ссылку, чтобы добавить или изменить её описание.\nОписание будет показано пользователям прямо в кнопке, через тире после названия ссылки.",
     {
       parse_mode: "Markdown",
       ...Markup.inlineKeyboard(buttons),
