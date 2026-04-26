@@ -1,0 +1,25 @@
+{
+  "name": "bot-multisite",
+  "version": "1.0.0",
+  "description": "Telegram multi-site loan offers bot (long polling, single-file build for bothost.ru)",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "build": "node build.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.4.1",
+    "drizzle-orm": "^0.45.2",
+    "telegraf": "^4.16.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.10.5",
+    "esbuild": "^0.24.2",
+    "typescript": "^5.7.2"
+  }
+}
